@@ -1,127 +1,68 @@
-const http = require('http');
+const express = require('express');
 const path = require('path');
-const fs = require('fs');
-const fsPromises = require('fs').promises;
-const EventEmitter = require('events');
+const cors = require('cors');
+const cookieParser = require('cookie-parser');
+const mongoose = require('mongoose');
 
-const logEvents = require('./logEvents');
-const mimeTypes = require('./mime-types');
+const { logger } = require('./middleware/logEvents');
+const errorHandler = require('./middleware/errorHandler');
+const credentials = require('./middleware/credentials');
+const corsOptions = require('./config/cors');
+const verifyJWT = require('./middleware/verifyJWT');
+const connectDB = require('./config/mongodb');
 
-class Emitter extends EventEmitter {};
-
-const serverEmitter = new Emitter();
-serverEmitter.on ('log', (message, fileName) => logEvents(message, fileName));
+require('dotenv').config();
 
 const PORT = process.env.PORT ?? 3500;
 
-const getContentType = (extension) => {
-  let contentType = null;
+connectDB();
 
-  switch(extension) {
-    case mimeTypes.CSS.extension:
-      contentType = mimeTypes.CSS.type;
-      break;
-    case mimeTypes.JS.extension:
-      contentType = mimeTypes.JS.type;
-      break;
-    case mimeTypes.JSON.extension:
-      contentType = mimeTypes.JSON.type;
-      break;
-    case mimeTypes.JPG.extension:
-      contentType = mimeTypes.JPG.type;
-      break;
-    case mimeTypes.PNG.extension:
-      contentType = mimeTypes.PNG.type;
-      break;
-    case mimeTypes.TXT.extension:
-      contentType = mimeTypes.TXT.type;
-      break;
-    default:
-      contentType = mimeTypes.HTML.type;
-  }
+const app = express();
 
-  return contentType;
-}
+// custom middleware logger.
+app.use(logger);
 
-const getPathToFile = (contentType, req) => {
-  let filePath = null;
-  if (contentType === mimeTypes.HTML.type && req.url === '/') {
-    filePath = path.join(__dirname, 'views', 'index.html');
+// Handle options credentials check before CORS and fetch
+app.use(credentials);
+
+// Middleware.
+app.use(cors(corsOptions));
+// built-in middleware to handle url encoded data e.g. form data of type
+// `content-type: applicaiton/x-www-form-urlencoded`.
+app.use(express.urlencoded({ extended: false }));
+// built-in middleware to handle json data.
+app.use(express.json());
+// built-in middleware to handle serving static files.
+app.use('/', express.static(path.join(__dirname, '/public')));
+app.use(cookieParser());
+
+// Routing.
+app.use('/', require('./routes/root'));
+app.use('/register', require('./routes/api/register'));
+app.use('/auth', require('./routes/api/auth'));
+app.use('/refresh', require('./routes/api/token-refresh'));
+app.use('/logout', require('./routes/api/logout'));
+
+app.use(verifyJWT);
+// app.use('/employees', verifyJWT, require('./routes/api/employees'));
+app.use('/employees', require('./routes/api/employees'));
+
+// Handle routes not found.
+app.all('*', (req, res) => {
+  res.status(404);
+
+  if(req.accepts('html')) {
+    res.sendFile(path.join(__dirname, 'views', '404.html'));
+  } else if(req.accepts('json')) {
+    res.json({ error: '404 Not Found' });
   } else {
-    if (contentType === mimeTypes.HTML.type && req.url.slice(-1) === '/') {
-      filePath = path.join(__dirname, 'views', req.url, 'index.html');
-    } else {
-      if (contentType === mimeTypes.HTML.type) {
-        filePath = path.join(__dirname, 'views', req.url);
-      } else {
-        filePath = path.join(__dirname, req.url)
-      }
-    }
-  }
-
-  return filePath;
-};
-
-const serveFile = async (filePath, contentType, response) => {
-  try {
-    const rawData = await fsPromises.readFile(filePath, !contentType.includes('image') ? 'utf8' : '');
-    const data = contentType === mimeTypes.JSON.type ? JSON.parse(rawData) : rawData;
-
-    response.writeHead(
-      filePath.includes('404.html') ? 404 : 200,
-      { 'Content-Type': contentType });
-
-      response.end(contentType === mimeTypes.JSON.type ? JSON.stringify(data) : data);
-  } catch(error) {
-    console.log(error);
-    serverEmitter.emit('log', `${error.name}\t${error.message}`, 'error.log');
-    response.statusCode = 500;
-    response.end();
-  }
-};
-
-const server = http.createServer((req, res) => {
-  console.log(req.url, req.method);
-  serverEmitter.emit('log', `${req.url}\t${req.method}`, 'requests.log');
-
-  const extension = path.extname(req.url);
-
-  const contentType = getContentType(extension);
-  let filePath = getPathToFile(contentType, req);
-
-  // Makes .html extension not required in the browser.
-  if (!extension && req.url.slice(-1) !== '/') {
-    filePath += '.html'
-  }
-
-  const doesFileExist = fs.existsSync(filePath);
-  if (doesFileExist) {
-    // Serve the file
-    serveFile(filePath, contentType, res);
-  } else {
-    //301 redirect
-    switch(path.parse(filePath).base) {
-      case 'old-page.html':
-        res.writeHead(301, { 'Location': '/redirect-page.html'});
-        res.end();
-        break;
-      case 'www-page.html':
-        res.writeHead(301, { 'Location': '/'});
-        res.end();
-        break;
-      default:
-        // server 404 response.
-        serveFile(path.join(__dirname, 'views', '404.html'), mimeTypes.HTML.type, res);
-    }
+    res.type('txt').send('404 Not Found');
   }
 });
+app.use(errorHandler);
 
-server.listen(PORT, () => console.log(`Server listening on port: ${PORT}`));
-
-
-// // Add listener for the log event.
-// serverEmitter.on('log', (msg) => logEvents(msg));
-
-// setTimeout(() => {
-//   serverEmitter.emit('log', 'Log event emitted');
-// }, 2000);
+// Set API listening.
+mongoose.connection.once('open', () => {
+  console.log('Connected to MongDB');
+  app.listen(PORT, () => console.log(`Server listening on port: ${PORT}`));
+});

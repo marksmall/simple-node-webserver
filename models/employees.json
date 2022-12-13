@@ -1,0 +1,9 @@
+[{
+  "id": 1,
+  "firstName": "John",
+  "surname": "Smith"
+}, {
+  "id": 2,
+  "firstName": "Jane",
+  "surname": "Smith"
+}]
